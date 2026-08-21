@@ -28,18 +28,42 @@ def load_subject(subj_id):
 
 def generate_synthetic_subject(n_samples=20000):
     """
-    Create fake data when real WESAD is not available.
-    This lets you test the pipeline without the dataset.
+    Create fake data with artificial heartbeats so neurokit2 can detect them.
+    This prevents the "0 features" error when real WESAD is not available.
     """
     t = np.linspace(0, n_samples/FS, n_samples)
-    # Fake ECG: a sine wave plus noise
-    ecg = np.sin(2*np.pi*1.2*t) + 0.5*np.random.randn(n_samples)
-    # Fake EDA: slow drift plus noise
-    eda = 0.5 + 0.2*np.sin(2*np.pi*0.05*t) + 0.1*np.random.randn(n_samples)
-    # Fake ACC: random values
-    acc = np.random.randn(3, n_samples) * 0.5
-    # Labels: 70% baseline (0), 30% stress (1)
+    
+    # ---------- Fake ECG with artificial R-peaks ----------
+    # Base signal: a slow sine wave (breathing)
+    ecg = 0.5 * np.sin(2 * np.pi * 0.3 * t)
+    
+    # Add artificial R-peaks (heartbeats) every ~0.8 seconds (75 BPM)
+    peak_positions = np.arange(0, n_samples, int(0.8 * FS))  # 0.8 seconds between beats
+    for pos in peak_positions:
+        if pos < n_samples:
+            # Add a sharp spike (like a real R-peak)
+            spike = np.exp(-((t - t[pos]) * 50) ** 2) * 2.0
+            ecg += spike
+    
+    # Add some random noise to make it realistic
+    ecg += 0.2 * np.random.randn(n_samples)
+    
+    # ---------- Fake EDA with artificial SCRs ----------
+    eda = 0.5 + 0.1 * np.sin(2 * np.pi * 0.02 * t)  # slow baseline drift
+    # Add some random SCR spikes (stress responses)
+    scr_positions = np.random.choice(n_samples, size=20, replace=False)
+    for pos in scr_positions:
+        spike = np.exp(-((t - t[pos]) * 10) ** 2) * 0.3
+        eda += spike
+    eda += 0.05 * np.random.randn(n_samples)
+    
+    # ---------- Fake ACC ----------
+    acc = np.random.randn(3, n_samples) * 0.2
+    
+    # ---------- Labels ----------
+    # 70% baseline (0), 30% stress (1)
     label = np.random.choice([0, 1], size=n_samples, p=[0.7, 0.3])
+    
     return ecg, eda, acc, label
 
 def load_all_subjects():
