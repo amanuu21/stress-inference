@@ -5,75 +5,86 @@ import numpy as np
 from src.config import DATA_RAW, SUBJECTS, FS
 
 def load_subject(subj_id):
-    """
-    Load one subject's data from the WESAD dataset.
-    Returns: ECG (1D array), EDA (1D), ACC (3 x n_samples), labels (1D)
-    """
+    """Load one subject's data from WESAD."""
     pkl_path = os.path.join(DATA_RAW, subj_id, f"{subj_id}.pkl")
     if not os.path.exists(pkl_path):
-        return None   # File not found
-
+        return None
     with open(pkl_path, "rb") as f:
         data = pickle.load(f, encoding="latin1")
-
-    # Extract signals
     ecg = data['signal']['chest']['ECG'].flatten()
     eda = data['signal']['chest']['EDA'].flatten()
-    acc = data['signal']['wrist']['ACC']          # shape (3, n_samples)
+    acc = data['signal']['wrist']['ACC']
     label = data['label'].flatten()
-
-    # Keep only baseline (0) and stress (1) – ignore amusement (2)
     mask = (label == 0) | (label == 1)
     return ecg[mask], eda[mask], acc[:, mask], label[mask]
 
-def generate_synthetic_subject(n_samples=20000):
+def generate_synthetic_subject(n_samples=30000):
     """
-    Create fake data with artificial heartbeats so neurokit2 can detect them.
-    This prevents the "0 features" error when real WESAD is not available.
+    Generate synthetic data with KNOWN features.
+    We'll generate the features directly instead of extracting them.
     """
+    np.random.seed(42)  # For reproducibility
+    
+    # Generate labels: 70% baseline (0), 30% stress (1)
+    # We'll create blocks of stress and baseline
+    labels = np.zeros(n_samples, dtype=int)
+    # Create 3 stress blocks of 3000 samples each
+    for start in [5000, 12000, 20000]:
+        end = min(start + 3000, n_samples)
+        labels[start:end] = 1
+    
+    # ----- ECG: artificial signal with clear peaks -----
     t = np.linspace(0, n_samples/FS, n_samples)
+    ecg = np.zeros(n_samples)
     
-    # ---------- Fake ECG with artificial R-peaks ----------
-    # Base signal: a slow sine wave (breathing)
-    ecg = 0.5 * np.sin(2 * np.pi * 0.3 * t)
-    
-    # Add artificial R-peaks (heartbeats) every ~0.8 seconds (75 BPM)
-    peak_positions = np.arange(0, n_samples, int(0.8 * FS))  # 0.8 seconds between beats
-    for pos in peak_positions:
+    # Place heartbeats at regular intervals with slight randomness
+    beat_positions = []
+    pos = 500  # Start after 500 samples
+    while pos < n_samples:
+        # 0.6 to 1.0 seconds between beats (60-100 BPM)
+        interval = int((0.6 + 0.4 * np.random.random()) * FS)
+        pos += interval
         if pos < n_samples:
-            # Add a sharp spike (like a real R-peak)
-            spike = np.exp(-((t - t[pos]) * 50) ** 2) * 2.0
-            ecg += spike
+            beat_positions.append(pos)
+            # Add a spike
+            width = int(0.02 * FS)
+            for i in range(-width, width):
+                idx = pos + i
+                if 0 <= idx < n_samples:
+                    ecg[idx] += 1.5 * np.exp(-((i/width)**2) * 8)
     
-    # Add some random noise to make it realistic
-    ecg += 0.2 * np.random.randn(n_samples)
+    # Add baseline wander and noise
+    ecg += 0.3 * np.sin(2 * np.pi * 0.15 * t)
+    ecg += 0.15 * np.random.randn(n_samples)
     
-    # ---------- Fake EDA with artificial SCRs ----------
-    eda = 0.5 + 0.1 * np.sin(2 * np.pi * 0.02 * t)  # slow baseline drift
-    # Add some random SCR spikes (stress responses)
-    scr_positions = np.random.choice(n_samples, size=20, replace=False)
-    for pos in scr_positions:
-        spike = np.exp(-((t - t[pos]) * 10) ** 2) * 0.3
-        eda += spike
-    eda += 0.05 * np.random.randn(n_samples)
+    # ----- EDA: baseline with stress spikes -----
+    eda = 0.5 + 0.05 * np.sin(2 * np.pi * 0.01 * t)
+    # Add SCRs (stress responses)
+    for pos in np.random.choice(n_samples, size=20, replace=False):
+        width = int(0.15 * FS)
+        for i in range(-width, width):
+            idx = pos + i
+            if 0 <= idx < n_samples:
+                eda[idx] += 0.2 * np.exp(-((i/width)**2) * 3)
+    eda += 0.02 * np.random.randn(n_samples)
     
-    # ---------- Fake ACC ----------
-    acc = np.random.randn(3, n_samples) * 0.2
+    # ----- ACC: random movement -----
+    acc = np.random.randn(3, n_samples) * 0.3
     
-    # ---------- Labels ----------
-    # 70% baseline (0), 30% stress (1)
-    label = np.random.choice([0, 1], size=n_samples, p=[0.7, 0.3])
+    # ----- Store beat positions for feature calculation -----
+    global _SYNTHETIC_BEATS
+    _SYNTHETIC_BEATS = np.array(beat_positions)
     
-    return ecg, eda, acc, label
+    return ecg, eda, acc, labels
+
+# Global variable for beat positions
+_SYNTHETIC_BEATS = None
+
+def get_synthetic_beats():
+    return _SYNTHETIC_BEATS
 
 def load_all_subjects():
-    """
-    Load all subjects from the WESAD dataset.
-    If a subject is missing, generate synthetic data for that subject.
-    Returns:
-        ecg_list, eda_list, acc_list, y_list  – each is a list of arrays per subject
-        groups – list of subject IDs repeated for each sample (for cross‑validation)
-    """
+    """Load all subjects, generating synthetic if missing."""
     ecg_list, eda_list, acc_list, y_list, groups = [], [], [], [], []
     for subj in SUBJECTS:
         data = load_subject(subj)
@@ -82,10 +93,9 @@ def load_all_subjects():
             ecg, eda, acc, y = generate_synthetic_subject()
         else:
             ecg, eda, acc, y = data
-        # Store signals (acc is transposed to shape (n_samples, 3))
         ecg_list.append(ecg)
         eda_list.append(eda)
-        acc_list.append(acc.T)   # now each row is one sample, 3 columns
+        acc_list.append(acc.T)
         y_list.append(y)
         groups.extend([subj] * len(y))
     return ecg_list, eda_list, acc_list, y_list, groups
